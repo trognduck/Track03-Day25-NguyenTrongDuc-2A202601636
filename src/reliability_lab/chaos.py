@@ -62,7 +62,16 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     Each transition_log entry is a dict with keys: "from", "to", "reason", "ts"
     where "ts" is time.time() (epoch seconds).
     """
-    raise NotImplementedError("TODO: implement calculate_recovery_time_ms()")
+    recoveries: list[float] = []
+    for breaker in gateway.breakers.values():
+        opened_ts: float | None = None
+        for event in breaker.transition_log:
+            if event["to"] == "open":
+                opened_ts = float(event["ts"])
+            elif event["to"] == "closed" and opened_ts is not None:
+                recoveries.append((float(event["ts"]) - opened_ts) * 1000)
+                opened_ts = None
+    return sum(recoveries) / len(recoveries) if recoveries else None
 
 
 def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig) -> RunMetrics:
@@ -86,7 +95,33 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
     5. Set recovery_time_ms via calculate_recovery_time_ms(gateway)
     6. Return metrics
     """
-    raise NotImplementedError("TODO: implement run_scenario()")
+    gateway = build_gateway(config, scenario.provider_overrides or None)
+    metrics = RunMetrics()
+    for _ in range(config.load_test.requests):
+        result = gateway.complete(random.choice(queries))
+        metrics.total_requests += 1
+        metrics.estimated_cost += result.estimated_cost
+        if result.cache_hit:
+            metrics.cache_hits += 1
+            metrics.estimated_cost_saved += 0.001
+        if result.route == "fallback":
+            metrics.fallback_successes += 1
+            metrics.successful_requests += 1
+        elif result.route == "static_fallback":
+            metrics.static_fallbacks += 1
+            metrics.failed_requests += 1
+        else:
+            metrics.successful_requests += 1
+        if result.latency_ms > 0:
+            metrics.latencies_ms.append(result.latency_ms)
+    metrics.circuit_open_count = sum(
+        1 for breaker in gateway.breakers.values()
+        for event in breaker.transition_log if event["to"] == "open"
+    )
+    metrics.recovery_time_ms = calculate_recovery_time_ms(gateway)
+    if gateway.cache is not None and hasattr(gateway.cache, "close"):
+        gateway.cache.close()
+    return metrics
 
 
 def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
